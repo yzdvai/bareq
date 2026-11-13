@@ -3,3 +3,6 @@ __pycache__/
 export/
 *.pt
 .DS_Store
+data/
+runs/
+results/
