@@ -431,8 +431,9 @@ def main():
 
     # ----- SIDD -----
     inst = sidd_instances(a.input)
-    if a.limit:
-        inst = inst[: a.limit * 3]
+    if a.limit:  # a few from every scene, so the smoke test still has train, val and test
+        seen = {}
+        inst = [i for i in inst if seen.setdefault(i["scene"], []).append(1) or len(seen[i["scene"]]) <= max(1, a.limit // 4)]
     sizes = read_many([i["gt"] for i in inst], fn=img_size)
     split_of = lambda s: "test" if s in SIDD_TEST_SCENES else "val" if s in SIDD_VAL_SCENES else "train"
     jobs, start = [], 0
