@@ -18,9 +18,14 @@ class LayerNorm2d(nn.Module):
         self.bias = nn.Parameter(torch.zeros(1, c, 1, 1))
         self.eps = eps
 
+    native = False  # True: use PyTorch's built-in layer norm while training (same maths, one fused kernel)
+
     def forward(self, x):
         if x.dtype != torch.float32:  # mixed precision: keep the statistics in float32 (squares overflow in float16)
             x = x.float()
+        if LayerNorm2d.native and not torch.onnx.is_in_onnx_export():
+            y = F.layer_norm(x.permute(0, 2, 3, 1), (x.shape[1],), self.weight.view(-1), self.bias.view(-1), self.eps)
+            return y.permute(0, 3, 1, 2)
         mu = x.mean(1, keepdim=True)
         d = x - mu
         var = (d * d).mean(1, keepdim=True)
