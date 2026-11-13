@@ -20,6 +20,7 @@ import shutil
 import sys
 import tarfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import torch
 from torch.utils.data import DataLoader
@@ -27,7 +28,7 @@ from torch.utils.data import DataLoader
 from . import data, metrics
 from .model import Bareq, count_params
 
-TOTAL_STEPS = 60000   # the fixed budget for all four runs
+TOTAL_STEPS = 45000   # the fixed budget for all four runs: about 6 hours on Kaggle's two T4 GPUs
 BATCH = 16
 CROP = 256
 LR = 5e-4
@@ -103,7 +104,11 @@ def prepare_data(src, cache, run):
             listing = [os.path.join(d, x)[len(src):] for d, ds, fs in os.walk(src) for x in ds + fs][:40]
             sys.exit(f"cannot find the {split} images under {src}. Contents: {listing}")
         t = time.time()
-        shutil.copytree(found, dst + ".part")
+        files = [os.path.join(d, f) for d, _, fs in os.walk(found) for f in fs]
+        for d in {os.path.dirname(f) for f in files}:
+            os.makedirs(os.path.join(dst + ".part", os.path.relpath(d, found)), exist_ok=True)
+        with ThreadPoolExecutor(16) as ex:  # many small files on a slow mount: copy in parallel
+            list(ex.map(lambda f: shutil.copyfile(f, os.path.join(dst + ".part", os.path.relpath(f, found))), files))
         os.replace(dst + ".part", dst)
         log(f"copied {split} images from {found} ({time.time() - t:.0f}s)")
     return cache
@@ -144,7 +149,8 @@ def main():
     ap.add_argument("--eval-limit", type=int, default=0, help="smoke test: score only this many test images per task")
     ap.add_argument("--stop-after", type=int, default=0, help="smoke test: pretend the session ended at this step")
     ap.add_argument("--no-amp", action="store_true")
-    ap.add_argument("--nchw", action="store_true", help="keep the default memory layout (speed comparison)")
+    ap.add_argument("--channels-last", action="store_true", help="other memory layout; slower on 2 x T4")
+    ap.add_argument("--nchw", action="store_true", help=argparse.SUPPRESS)  # old flag, now the default
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     a = ap.parse_args()
     out = a.out or f"/kaggle/working/bareq-run-{a.run}"
@@ -160,8 +166,8 @@ def main():
     man = json.load(open(os.path.join(os.path.dirname(src), "manifest.json")))
 
     torch.manual_seed(a.seed)
-    torch.backends.cudnn.benchmark = True
-    CL = torch.contiguous_format if a.nchw or dev.type != "cuda" else torch.channels_last  # layout only, same maths
+    torch.backends.cudnn.benchmark = False  # measured: benchmark mode more than halves the speed on 2 x T4
+    CL = torch.channels_last if a.channels_last and dev.type == "cuda" else torch.contiguous_format  # layout only, same maths
     model = Bareq().to(dev).to(memory_format=CL)
     ema = copy.deepcopy(model).requires_grad_(False).eval()
     opt = torch.optim.AdamW(model.parameters(), lr=LR, betas=(0.9, 0.9), weight_decay=0.0)

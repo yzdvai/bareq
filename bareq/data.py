@@ -80,5 +80,5 @@ def list_pairs(root, split, task, limit=0):
 
 
 def load_image(path, device):
-    a = np.asarray(Image.open(path).convert("RGB"))
+    a = np.array(Image.open(path).convert("RGB"))
     return torch.from_numpy(a).to(device).permute(2, 0, 1)[None].float() / 255
