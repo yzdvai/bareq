@@ -47,7 +47,8 @@ SIDD_VAL_CROPS = 4
 DIV2K_VAL = 40                      # taken from the 800 train images
 DIV2K_FULL_PATCHES = 6              # per image at full size (plus what fits at half size)
 LOL_VAL_SEEDS = 40
-LOL_COPY = 0.10                     # thumbnail distance below which two photos are the same photo
+LOL_COPY = 0.10                     # normalised-thumbnail distance: same bright photo
+LOL_LOW_COPY = 1.0                  # raw low-light thumbnail difference (0-255): same dark photo
 LOL_SCENE = 0.35                    # below this, treat as the same scene (conservative)
 PATCH = 512
 TEST_LONG_SIDE = 1024               # DIV2K test images are resized to this before degrading
@@ -160,9 +161,20 @@ def thumb(x):
     return ((t - t.mean()) / (t.std() + 1e-6)).ravel()
 
 
-def split_lol(pairs, highs, rng):
+def raw_thumb(x):
+    return cv2.resize(x, (48, 32), interpolation=cv2.INTER_AREA).astype(np.float32).ravel()
+
+
+def split_lol(pairs, highs, lows, rng):
+    """LOL shoots one scene at several dark exposures and pairs each with the same bright photo, so a shared
+    bright photo is NOT a duplicate pair. A pair is a copy only if its dark AND bright images both match.
+    Leakage is handled at scene level: train pairs whose bright photo is close to any test image are dropped."""
     n = len(pairs)
     T = np.stack([thumb(h) for h in highs])
+    L = np.stack([raw_thumb(x) for x in lows])
+
+    def is_copy(i, k):
+        return D[i, k] < LOL_COPY and float(np.abs(L[i] - L[k]).mean()) < LOL_LOW_COPY
     D = np.empty((n, n), np.float32)
     for i in range(n):  # row by row: a full n x n x 1536 broadcast would need ~10 GB
         D[i] = np.abs(T - T[i]).mean(1)
@@ -175,7 +187,7 @@ def split_lol(pairs, highs, rng):
     # test: keep every official test image except exact copies of one already kept
     test = []
     for i in test_all:
-        j = next((k for k in test if D[i, k] < LOL_COPY), None)
+        j = next((k for k in test if is_copy(i, k)), None)
         if j is None:
             test.append(i)
         else:
@@ -192,7 +204,7 @@ def split_lol(pairs, highs, rng):
             cand.append(i)
     keep = []
     for i in cand:
-        j = next((k for k in keep if D[i, k] < LOL_COPY), None)
+        j = next((k for k in keep if is_copy(i, k)), None)
         if j is None:
             keep.append(i)
         else:
@@ -209,14 +221,16 @@ def split_lol(pairs, highs, rng):
 
     v1 = [i for i in range(n) if pairs[i]["src"] == "v1"]
     v2 = [i for i in range(n) if pairs[i]["src"] == "v2"]
-    v1_in_v2 = int((D[np.ix_(v1, v2)].min(1) < LOL_COPY).sum()) if v1 and v2 else 0
+    v1_in_v2 = sum(any(is_copy(i, k) for k in v2 if D[i, k] < LOL_COPY) for i in v1)
+    shared = int(sum((D[i] < LOL_COPY).any() for i in range(n)))
     hist = lambda a: np.histogram(np.minimum(a, 1.5), bins=15, range=(0, 1.5))[0].tolist()
     test_test = [float(D[i, [k for k in test_all if k != i]].min()) for i in test_all] if len(test_all) > 1 else []
     report = dict(
-        copy_threshold=LOL_COPY, scene_threshold=LOL_SCENE,
+        copy_threshold=LOL_COPY, low_copy_threshold=LOL_LOW_COPY, scene_threshold=LOL_SCENE,
+        pairs_sharing_a_bright_photo=shared,
         found=dict(v1=len(v1), v2=len(v2), official_test=len(test_all), official_train=len(train_all)),
         kept=dict(train=len(train), val=len(val), test=len(test)),
-        v1_images_copied_in_v2=v1_in_v2,
+        v1_pairs_copied_in_v2=v1_in_v2,
         dropped_counts={w: sum(1 for _, x, _ in dropped if x.startswith(w))
                         for w in ("copy of test", "same scene as test", "copy of train")},
         dropped=[dict(id=pairs[i]["id"], why=w, dist=round(d, 3)) for i, w, d in dropped],
@@ -376,11 +390,11 @@ def main():
     log(f"LOL: {len(pairs)} pairs found, reading")
     highs = [crop16(x) for x in read_many([p["high"] for p in pairs])]
     lows = [crop16(x) for x in read_many([p["low"] for p in pairs])]
-    tr, va, te, rep, check = split_lol(pairs, highs, rng)
+    tr, va, te, rep, check = split_lol(pairs, highs, lows, rng)
     if check is not None:
         cv2.imwrite(os.path.join(out, "dedupe_check.jpg"), cv2.cvtColor(check, cv2.COLOR_RGB2BGR),
                     [cv2.IMWRITE_JPEG_QUALITY, 85])
-    log(f"LOL split: {rep['kept']}, dropped {rep['dropped_counts']}, v1 photos copied in v2: {rep['v1_images_copied_in_v2']}")
+    log(f"LOL split: {rep['kept']}, dropped {rep['dropped_counts']}, v1 pairs copied in v2: {rep['v1_pairs_copied_in_v2']}, pairs sharing a bright photo: {rep['pairs_sharing_a_bright_photo']}")
     shape = highs[tr[0]].shape
     new_npy(os.path.join(out, "train_dark_low.npy"), len(tr), shape)
     new_npy(os.path.join(out, "train_dark_high.npy"), len(tr), shape)

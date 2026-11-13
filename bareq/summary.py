@@ -12,7 +12,8 @@ def main():
     m = json.load(open(os.path.join(d, "manifest.json")))
     r = m["lol"]["dedupe"]
     print("commit:", m["git_commit"][:7], "| seconds:", m["seconds"], "| cpus/workers:", m["cpus"], m["workers"])
-    print("LOL found:", r["found"], "| v1 photos copied in v2:", r["v1_images_copied_in_v2"])
+    print("LOL found:", r["found"], "| v1 pairs copied in v2:", r["v1_pairs_copied_in_v2"],
+          "| pairs sharing a bright photo:", r["pairs_sharing_a_bright_photo"])
     print("LOL kept:", r["kept"], "| dropped:", r["dropped_counts"])
     print("LOL histogram, train -> nearest test (0-1.5, step 0.1):", r["hist_train_to_nearest_test"])
     print("LOL histogram, test -> nearest other test:", r["hist_test_to_nearest_other_test"])
