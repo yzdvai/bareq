@@ -48,7 +48,7 @@ DIV2K_VAL = 40                      # taken from the 800 train images
 DIV2K_FULL_PATCHES = 6              # per image at full size (plus what fits at half size)
 LOL_VAL_SEEDS = 40
 LOL_COPY = 0.10                     # normalised-thumbnail distance: same bright photo
-LOL_LOW_COPY = 1.0                  # raw low-light thumbnail difference (0-255): same dark photo
+LOL_LOW_COPY = 0.25                 # full-size mean abs difference of the dark images (0-255): same photo
 LOL_SCENE = 0.35                    # below this, treat as the same scene (conservative)
 PATCH = 512
 TEST_LONG_SIDE = 1024               # DIV2K test images are resized to this before degrading
@@ -173,8 +173,18 @@ def split_lol(pairs, highs, lows, rng):
     T = np.stack([thumb(h) for h in highs])
     L = np.stack([raw_thumb(x) for x in lows])
 
+    cache = {}
+
     def is_copy(i, k):
-        return D[i, k] < LOL_COPY and float(np.abs(L[i] - L[k]).mean()) < LOL_LOW_COPY
+        """Same bright photo AND the same dark photo pixel for pixel (a separate shot has its own noise).
+        Dark frames are so dark that thumbnails can't tell exposures apart, so compare at full size."""
+        if D[i, k] >= LOL_COPY or float(np.abs(L[i] - L[k]).mean()) > 3.0:
+            return False
+        key = (min(i, k), max(i, k))
+        if key not in cache:
+            a, b = lows[i], lows[k]
+            cache[key] = a.shape == b.shape and float(np.abs(a.astype(np.int16) - b).mean()) < LOL_LOW_COPY
+        return cache[key]
     D = np.empty((n, n), np.float32)
     for i in range(n):  # row by row: a full n x n x 1536 broadcast would need ~10 GB
         D[i] = np.abs(T - T[i]).mean(1)
