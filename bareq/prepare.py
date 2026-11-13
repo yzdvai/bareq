@@ -30,7 +30,7 @@ import sys
 import tarfile
 import time
 from concurrent.futures import ThreadPoolExecutor
-from multiprocessing import Pool
+import multiprocessing as mp
 
 import cv2
 import numpy as np
@@ -446,7 +446,7 @@ def main():
     new_npy(os.path.join(out, "train_sidd_noisy.npy"), start, (PATCH, PATCH, 3))
     new_npy(os.path.join(out, "train_sidd_gt.npy"), start, (PATCH, PATCH, 3))
     log(f"SIDD: {len(inst)} images, {start} train patches")
-    with Pool(workers) as pool:
+    with mp.get_context("spawn").Pool(workers) as pool:  # not fork: forked OpenCV deadlocks on Linux
         for _ in progress(pool.imap_unordered(job_sidd, jobs), len(jobs), "SIDD"):
             pass
     man["sidd"] = {sp: dict(scenes=sorted({j[0]["scene"] for j in jobs if j[1] == sp}),
@@ -480,7 +480,7 @@ def main():
     log(f"DIV2K: {len(trn_files)} train images -> {start} patches, val {len(val_files)}, test {len(tst)}")
     fixed = [(p, stage, "val", SEED + 3000 + k, True) for k, p in enumerate(val_files)] + \
             [(p, stage, "test", SEED + 4000 + k, False) for k, p in enumerate(tst)]
-    with Pool(workers) as pool:
+    with mp.get_context("spawn").Pool(workers) as pool:  # not fork: forked OpenCV deadlocks on Linux
         for _ in progress(pool.imap_unordered(job_div2k_train, jobs), len(jobs), "DIV2K train"):
             pass
         params = dict(progress(pool.imap_unordered(job_div2k_fixed, fixed), len(fixed), "DIV2K val/test"))
