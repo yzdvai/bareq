@@ -57,7 +57,8 @@ def tiled(model, x, tile=256, overlap=32, batch=8):
     _, _, h, w = x.shape
     ph, pw = max(0, tile - h), max(0, tile - w)
     if ph or pw:
-        x = F.pad(x, (0, pw, 0, ph), mode="reflect")
+        # reflect needs the padding to be smaller than the image; very small images repeat the edge instead
+        x = F.pad(x, (0, pw, 0, ph), mode="reflect" if ph < h and pw < w else "replicate")
     H, W = x.shape[-2:]
     stride = tile - overlap
     pos = [(y, xx) for y in tile_positions(H, tile, stride) for xx in tile_positions(W, tile, stride)]

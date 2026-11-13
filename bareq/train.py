@@ -144,6 +144,7 @@ def main():
     ap.add_argument("--eval-limit", type=int, default=0, help="smoke test: score only this many test images per task")
     ap.add_argument("--stop-after", type=int, default=0, help="smoke test: pretend the session ended at this step")
     ap.add_argument("--no-amp", action="store_true")
+    ap.add_argument("--nchw", action="store_true", help="keep the default memory layout (speed comparison)")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     a = ap.parse_args()
     out = a.out or f"/kaggle/working/bareq-run-{a.run}"
@@ -159,7 +160,9 @@ def main():
     man = json.load(open(os.path.join(os.path.dirname(src), "manifest.json")))
 
     torch.manual_seed(a.seed)
-    model = Bareq().to(dev)
+    torch.backends.cudnn.benchmark = True
+    CL = torch.contiguous_format if a.nchw or dev.type != "cuda" else torch.channels_last  # layout only, same maths
+    model = Bareq().to(dev).to(memory_format=CL)
     ema = copy.deepcopy(model).requires_grad_(False).eval()
     opt = torch.optim.AdamW(model.parameters(), lr=LR, betas=(0.9, 0.9), weight_decay=0.0)
     scaler = torch.amp.GradScaler(enabled=amp)
@@ -208,11 +211,13 @@ def main():
                             pin_memory=dev.type == "cuda", persistent_workers=a.workers > 0,
                             multiprocessing_context="spawn" if a.workers > 0 else None,
                             prefetch_factor=4 if a.workers > 0 else None)
-        last_ckpt = t_log = time.time()
+        last_ckpt = t_log = t_end = time.time()
         loss_sum, loss_n, bad = 0.0, 0, 0
+        log_step, wait = step, 0.0  # wait = time spent waiting for data
         model.train()
         for x, y in loader:
-            x = x.to(dev, non_blocking=True).float() / 255
+            wait += time.time() - t_end
+            x = (x.to(dev, non_blocking=True).float() / 255).contiguous(memory_format=CL)
             y = y.to(dev, non_blocking=True).float() / 255
             for g in opt.param_groups:
                 g["lr"] = lr_at(step, a.total_steps, LR)
@@ -239,15 +244,15 @@ def main():
             if step % 100 == 0 or step == a.total_steps:
                 dt = time.time() - t_log
                 train_seconds += dt
-                n = 100 if step % 100 == 0 else step % 100
+                n = step - log_step
                 rec = dict(step=step, loss=loss_sum / max(1, loss_n), lr=opt.param_groups[0]["lr"],
-                           it_s=n / dt, skipped=bad)
+                           it_s=n / dt, data_wait=round(wait / dt, 3), skipped=bad)
                 history.append(rec)
                 if step % 500 == 0 or step == a.total_steps or step <= 300:
                     left = (a.total_steps - step) / rec["it_s"] / 3600
                     log(f"step {step}/{a.total_steps} loss {rec['loss']:.4f} lr {rec['lr']:.1e} "
-                        f"{rec['it_s']:.2f} it/s, about {left:.1f} h left")
-                loss_sum, loss_n = 0.0, 0
+                        f"{rec['it_s']:.2f} it/s (waiting for data {rec['data_wait']:.0%}), about {left:.1f} h left")
+                loss_sum, loss_n, log_step, wait = 0.0, 0, step, 0.0
                 t_log = time.time()
             if step % a.val_every == 0 or step == a.total_steps:
                 v = evaluate(ema, root, "val", dev, limit=a.val_limit, tasks=("dark", "noisy", "old"))
@@ -255,6 +260,7 @@ def main():
                 log("val PSNR/SSIM  " + "  ".join(f"{k} {r['psnr']:.2f}/{r['ssim']:.3f}" for k, r in v.items()))
                 model.train()
                 t_log = time.time()
+                wait = 0.0
             done = step >= a.total_steps
             out_of_time = (time.time() - T0) / 3600 > a.max_hours
             fake_stop = a.stop_after and step >= a.stop_after
@@ -263,6 +269,7 @@ def main():
                 last_ckpt = t_log = time.time()
             if done:
                 break
+            t_end = time.time()
             if out_of_time or fake_stop:
                 log(f"STOPPED at step {step}/{a.total_steps}. Run again with this output attached as an input to resume.")
                 return
