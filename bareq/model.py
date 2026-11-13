@@ -19,6 +19,8 @@ class LayerNorm2d(nn.Module):
         self.eps = eps
 
     def forward(self, x):
+        if x.dtype != torch.float32:  # mixed precision: keep the statistics in float32 (squares overflow in float16)
+            x = x.float()
         mu = x.mean(1, keepdim=True)
         d = x - mu
         var = (d * d).mean(1, keepdim=True)
