@@ -88,9 +88,24 @@ def prepare_data(src, cache, run):
             os.replace(d + ".part", d)
             log(f"copied {f} ({os.path.getsize(d) / 1e9:.1f} GB, {time.time() - t:.0f}s)")
     for split in ("val", "test"):
-        if not os.path.isdir(os.path.join(cache, split)):
-            with tarfile.open(os.path.join(src, f"{split}.tar")) as t:
+        dst = os.path.join(cache, split)
+        if os.path.isdir(dst):
+            continue
+        tar = os.path.join(src, f"{split}.tar")
+        if os.path.isfile(tar):
+            with tarfile.open(tar) as t:
                 t.extractall(cache)
+            continue
+        # Kaggle unpacks archives when it makes a dataset, so look for the unpacked folder instead
+        found = next((d for d, _, _ in os.walk(src, followlinks=True)
+                      if os.path.isdir(os.path.join(d, "dark", "input")) and split in d[len(src):].lower()), None)
+        if not found:
+            listing = [os.path.join(d, x)[len(src):] for d, ds, fs in os.walk(src) for x in ds + fs][:40]
+            sys.exit(f"cannot find the {split} images under {src}. Contents: {listing}")
+        t = time.time()
+        shutil.copytree(found, dst + ".part")
+        os.replace(dst + ".part", dst)
+        log(f"copied {split} images from {found} ({time.time() - t:.0f}s)")
     return cache
 
 
