@@ -41,6 +41,32 @@ def log(*s):
     print(f"[{(time.time() - T0) / 60:6.1f}m]", *s, flush=True)
 
 
+def resources():
+    """Memory and other things that can run out, for the log. Linux only."""
+    try:
+        def kb(path, key):
+            for line in open(path):
+                if line.startswith(key):
+                    return int(line.split()[1])
+            return 0
+        me = os.getpid()
+        kids = 0
+        for pid in os.listdir("/proc"):
+            if pid.isdigit() and int(pid) != me:
+                try:
+                    if int(open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()[1]) == me:
+                        kids += kb(f"/proc/{pid}/status", "VmRSS:")
+                except (OSError, ValueError, IndexError):
+                    pass
+        shm = shutil.disk_usage("/dev/shm")
+        return dict(main_gb=round(kb("/proc/self/status", "VmRSS:") / 1e6, 2), workers_gb=round(kids / 1e6, 2),
+                    free_gb=round(kb("/proc/meminfo", "MemAvailable:") / 1e6, 2), shm_gb=round(shm.used / 1e9, 2),
+                    fds=len(os.listdir("/proc/self/fd")), threads=kb("/proc/self/status", "Threads:"),
+                    disk_free_gb=round(shutil.disk_usage(".").free / 1e9, 1))
+    except Exception:  # never let the log line stop training
+        return {}
+
+
 def find_file(root, name):
     for d, _, files in os.walk(root, followlinks=True):
         if name in files:
@@ -253,11 +279,17 @@ def main():
                 n = step - log_step
                 rec = dict(step=step, loss=loss_sum / max(1, loss_n), lr=opt.param_groups[0]["lr"],
                            it_s=n / dt, data_wait=round(wait / dt, 3), skipped=bad)
+                if step % 500 == 0:
+                    rec["res"] = resources()
                 history.append(rec)
                 if step % 500 == 0 or step == a.total_steps or step <= 300:
                     left = (a.total_steps - step) / rec["it_s"] / 3600
                     log(f"step {step}/{a.total_steps} loss {rec['loss']:.4f} lr {rec['lr']:.1e} "
                         f"{rec['it_s']:.2f} it/s (waiting for data {rec['data_wait']:.0%}), about {left:.1f} h left")
+                    r = rec.get("res")
+                    if r:
+                        log(f"   memory: main {r['main_gb']} GB, workers {r['workers_gb']} GB, free {r['free_gb']} GB, "
+                            f"shm {r['shm_gb']} GB | open files {r['fds']}, threads {r['threads']}, disk free {r['disk_free_gb']} GB")
                 loss_sum, loss_n, log_step, wait = 0.0, 0, step, 0.0
                 t_log = time.time()
             if step % a.val_every == 0 or step == a.total_steps:
@@ -268,17 +300,22 @@ def main():
                 t_log = time.time()
                 wait = 0.0
             done = step >= a.total_steps
+            low_mem = step % 100 == 0 and 0 < resources().get("free_gb", 99) < 2.5
             out_of_time = (time.time() - T0) / 3600 > a.max_hours
             fake_stop = a.stop_after and step >= a.stop_after
-            if done or out_of_time or fake_stop or time.time() - last_ckpt > a.ckpt_minutes * 60:
-                save("finished" if done else "time limit" if out_of_time else "test stop" if fake_stop else "periodic")
+            if done or out_of_time or fake_stop or low_mem or time.time() - last_ckpt > a.ckpt_minutes * 60:
+                save("finished" if done else "time limit" if out_of_time else "test stop" if fake_stop else
+                     "memory low" if low_mem else "periodic")
                 last_ckpt = t_log = time.time()
             if done:
                 break
             t_end = time.time()
+            if low_mem:
+                log(f"MEMORY LOW at step {step}: {resources()}. Stopping so the supervisor can start a fresh process.")
+                sys.exit(76)
             if out_of_time or fake_stop:
                 log(f"STOPPED at step {step}/{a.total_steps}. Run again with this output attached as an input to resume.")
-                return
+                sys.exit(75 if out_of_time else 0)
         del loader
 
     # ----- finished: score on the test sets and export -----
